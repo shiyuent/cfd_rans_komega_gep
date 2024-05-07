@@ -1,0 +1,9 @@
+rm *.dat
+Ray=Ra2e7
+
+cp init/input.data.Ra2e7 input.data
+make clean
+make
+./kom.x
+
+cp output.dat $Ray/Ra2e7_kom_gep.dat

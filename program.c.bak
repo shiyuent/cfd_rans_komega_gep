@@ -1,0 +1,552 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include "nr.h"
+#include "nrutil.h"
+
+#define NO_SLIP
+#define EXPLICIT
+#define TINY 1.0e-8
+
+void EquallySpacedGrid(double *y,int N);
+void StretchedGrid(double *y,int N);
+void ReadGridAndInitialGuessData(char *Filename,double *y,double *U,double *Temperature,double *k,double *ep,double *v2,double *f,int N);
+void WriteGridAndInitialGuessData(char *Filename,double *y,double *U,double *Temperature,double *k,double *ep,double *v2,double *f,int N);
+double Calc_Utau(double *U,double *y,double nu);
+void LinearInterpolate(double *func,double *y,double yp,double *value,int N);
+void ReadRestartData(char *Filename,double *y,double *U,double *Temperature,double *k,double *ep,double *v2,double *f,int N);
+
+void main(void)
+{
+  double rn,ce1,ce2,sige,sigk,c1,c2,a1,cmu,CT,ce1s,ceta,CL;
+  double *A,*B,*C,*RHS,temp; /* Pointer to arrays used for banded matrices */
+  int N,i,iter,maxiter;
+  double *y,*k,*ep,*U,*d,dx,*T,nu,*v2,*f,*L,utau;/* utau is the friction velocity*/
+  double xi,ubulk;
+  double temp1,temp2,temp3;
+  double *U_old,*v2_old,*f_old,*ep_old,*k_old;
+  double *Temperature,*Temperature_old;
+  double L2Norm_U,L2Norm_k,L2Norm_ep,L2Norm_v2,L2Norm_f,iacc,L2Norm_Temperature;
+  double y_cut,v2_cut,er_v2,ep_cut,er_ep;
+  double dy,dyplus1;
+  double uplus,ThetaPlus;
+  double gravity,RayleighNumber,beta,GrasshofNumber,PrandtlNumber,kappa;
+  double prod,Gb,fudge,fudge_ep,Prt;
+  char InFilename[100],OutFilename[100];
+  char DefaultGuess,bc_iacc;
+  int stop=0,n;
+  FILE *fp;
+
+  /*************************
+    Simulation parameters
+    ************************/
+  N=201;
+  maxiter=200000;
+  dx=1.0;
+  iacc=1.0;
+  
+  /*********************
+    Model parameters
+    ********************/
+// in the part only RayleighNumber and c1=1.4, 2.2 and CL=0.23 and Cl=0.3 are changed to test the v2f model
+  /*rn=395.0;*/
+  
+  RayleighNumber=5.4e+5;
+  //RayleighNumber=5.4e+5;
+  //RayleighNumber=2.e+7;
+  PrandtlNumber=0.709;
+  GrasshofNumber=RayleighNumber/PrandtlNumber;
+  
+ gravity=9.81;
+ kappa=1./RayleighNumber;
+ beta=1./(GrasshofNumber*gravity);
+ nu=1./GrasshofNumber;
+
+//gravity=1.0;
+//beta=1.0;
+//nu=sqrt(1/GrasshofNumber);
+//kappa=nu/PrandtlNumber;
+
+/*gravity=1.0;
+  beta=RayleighNumber;
+  nu=1./PrandtlNumber;
+  kappa=1.0;*/
+
+  // rn=395;
+
+  cmu=0.22;
+  ce1=1.4;
+  ce2=1.9;
+  
+  //c1=1.4; /*original model*/
+  c1=2.2;
+  c2=0.3;
+
+  sigk=1.0;
+  sige=1.3;
+
+  ceta=70.0;
+
+  a1=0.045; /*sqrt(vk)*/
+  CT=6.0;
+  CL=0.23;
+  n=6;
+
+// simple gradient diffusion hypothesis
+/*
+fudge=-1;
+fudge_ep=0.0;
+Prt=0.9;
+*/
+
+/*
+// general gradient difffusion hypothesis
+fudge=0.18;
+// fudge=0.22;
+// fudge=0.25;
+ fudge_ep=0.0;
+ Prt=cmu/fudge;
+*/
+
+  fudge=0.0; // ctheta in GGDH
+  fudge_ep=0.0;
+  Prt=0.9;
+
+  
+  y=dvector(0,N-1);
+  ep=dvector(0,N-1);
+  U=dvector(0,N-1);
+  Temperature=dvector(0,N-1);
+  L=dvector(0,N-1);
+  v2=dvector(0,N-1);
+  f=dvector(0,N-1);
+  k=dvector(0,N-1);
+  d=dvector(0,N-1);/*d is the eddy viscosity*/
+  A=dvector(1,N);
+  B=dvector(1,N);
+  C=dvector(1,N);
+  RHS=dvector(1,N);
+  T=dvector(0,N-1);/*t is the turbulence time scale*/
+  U_old=dvector(0,N-1);
+  Temperature_old=dvector(0,N-1);
+  v2_old=dvector(0,N-1);
+  f_old=dvector(0,N-1);
+  ep_old=dvector(0,N-1);
+  k_old=dvector(0,N-1);
+
+  /*EquallySpacedGrid(y,N);*/
+  /*StretchedGrid(y,N);*/
+
+  sprintf(InFilename,"input.data");
+  ReadRestartData(InFilename,y,U,Temperature,k,ep,v2,f,N);
+/*  DefaultGuess='y';
+  bc_iacc='y';
+  printf("Use default guess values > ");
+  scanf("%s",&DefaultGuess);
+
+ //   Initial guessed value for k, epsilon and u
+  if(DefaultGuess=='y'){
+    sprintf(InFilename,"VeryFirstGridAndGuess.data");
+    ReadGridAndInitialGuessData(InFilename,y,U,Temperature,k,ep,v2,f,N);
+    printf("Would you like to enter boudary conditions ? ");
+    scanf("%s",&bc_iacc);
+    if(bc_iacc=='y'){
+      printf("Enter iacc value > ");
+      scanf("%lf",&iacc);
+    }
+      
+  }
+  else{
+    sprintf(InFilename,"LatestGridAndGuess.data");
+    ReadRestartData(InFilename,y,U,Temperature,k,ep,v2,f,N);
+    printf("Would you like to enter boudary conditions ? ");
+    scanf("%s",&bc_iacc);
+    if(bc_iacc=='y'){
+      printf("Enter iacc value > ");
+      scanf("%lf",&iacc);
+    }
+  }
+*/
+  stop=0;
+  iter=0;
+  
+  while((iter<maxiter) && (stop==0)){
+    iter++;
+    U[0]=0.0;
+
+    memcpy(U_old,U,N*sizeof(double));
+    memcpy(Temperature_old,Temperature,N*sizeof(double));
+    memcpy(k_old,k,N*sizeof(double));
+    memcpy(ep_old,ep,N*sizeof(double));
+    memcpy(v2_old,v2,N*sizeof(double));
+    memcpy(f_old,f,N*sizeof(double));
+    
+    /*
+     *Calculating length and time scales and eddy viscosity
+     */
+    for(i=0;i<=N-1;i++){
+      T[i]=DMAX(fabs(k[i]/ep[i]),CT*pow(fabs(nu/ep[i]),0.5));
+      d[i]=fabs(cmu*T[i]*v2[i]);
+      L[i]=CL*DMAX(pow(fabs(k[i]),1.5)/fabs(ep[i]),ceta*pow(pow(nu,3.)/fabs(ep[i]),0.25));
+      /*k[i]+=1.e-10;
+      ep[i]+=1.e-10;
+      v2[i]+=1.e-10;*/
+    }
+    
+    /********************************
+     * k-equation
+     ********************************/
+
+    /*
+     * Set up boundary problem close to the wall (k=0)
+     */
+    A[1]=0.0;
+    B[1]=1.0;
+    C[1]=0.0;
+    RHS[1]=0.0;
+    for(i=1;i<=N-2;i++){
+      /*
+       *Setting up coefficients for k-equation
+       */
+      A[i+1]=(1./((y[i]-y[i-1])*(y[i+1]-y[i-1])))*(2.*nu+(d[i]/sigk)+(d[i-1]/sigk));
+      C[i+1]=(1./((y[i+1]-y[i])*(y[i+1]-y[i-1])))*(2.*nu+(d[i]/sigk)+(d[i+1]/sigk));
+      B[i+1]=-A[i+1]-C[i+1]-(1./dx)-fabs(ep[i]/k[i]);
+      Gb=beta*gravity*d[i]*(k[i]/ep[i])*((U[i+1]-U[i-1])/(y[i+1]-y[i-1]))*((Temperature[i+1]-Temperature[i-1])/(y[i+1]-y[i-1]));
+   //   Gb=(gravity*beta)*(d[i]/Prt)*((Temperature[i+1]-Temperature[i-1])/(y[i+1]-y[i-1]));
+      prod=d[i]*pow((U[i+1]-U[i-1])/(y[i+1]-y[i-1]),2.)+fudge*Gb;
+      RHS[i+1]=-prod-(k[i]/dx);
+    }
+    /*
+     *Set up boundary problem close to the other wall
+     */
+    A[N]=0.0;
+    B[N]=1.0;
+    C[N]=0.0;
+    RHS[N]=0.0;
+    
+    tridag(A,B,C,RHS,k-1,N);
+
+    /***************************
+     *epsilon equation
+     **************************/
+    A[1]=0.0;
+    B[1]=1.0;
+    C[1]=0.0;
+    RHS[1]=k[1]*2.*nu/pow(y[1],2.);
+    for(i=1;i<=N-2;i++){
+      /*
+       *Setting up coefficients for eps-equation
+       */
+      A[i+1]=(1./((y[i]-y[i-1])*(y[i+1]-y[i-1])))*(2.*nu+(d[i]/sige)+(d[i-1]/sige));
+      C[i+1]=(1./((y[i+1]-y[i])*(y[i+1]-y[i-1])))*(2.*nu+(d[i]/sige)+(d[i+1]/sige));
+      B[i+1]=-A[i+1]-C[i+1]-(1./dx)-(ce2/T[i]);
+      ce1s=ce1*(1+a1*pow(fabs(k[i]/v2[i]),0.5));
+      Gb=beta*gravity*d[i]*(k[i]/ep[i])*((U[i+1]-U[i-1])/(y[i+1]-y[i-1]))*((Temperature[i+1]-Temperature[i-1])/(y[i+1]-y[i-1]));
+    //  Gb=(gravity*beta)*(d[i]/Prt)*((Temperature[i+1]-Temperature[i-1])/(y[i+1]-y[i-1]));
+      prod=d[i]*pow((U[i+1]-U[i-1])/(y[i+1]-y[i-1]),2.)+fudge_ep*Gb;
+      RHS[i+1]=-(ce1s*prod/T[i])-ep[i]/dx;
+      /*RHS[i+1]=-cmu*ce1s*pow((U[i+1]-U[i-1])/(y[i+1]-y[i-1]),2.)*v2[i]-ep[i]/dx;*/
+    }
+    A[N]=0.0;
+    B[N]=1.0;
+    C[N]=0.0;
+    RHS[N]=k[N-2]*2.*nu/pow(y[N-1]-y[N-2],2.);
+
+    tridag(A,B,C,RHS,ep-1,N);
+
+    /************************
+     *v2 equation
+     ***********************/
+    A[1]=0.0;
+    B[1]=1.0;
+    C[1]=0.0;
+    RHS[1]=0.0;
+    for(i=1;i<=N-2;i++){
+      /*
+       *Setting up matrix for v2 equation
+       */
+      A[i+1]=(1./((y[i]-y[i-1])*(y[i+1]-y[i-1])))*(2.*nu+(d[i]/sigk)+(d[i-1]/sigk));
+      C[i+1]=(1./((y[i+1]-y[i])*(y[i+1]-y[i-1])))*(2.*nu+(d[i]/sigk)+(d[i+1]/sigk));
+      B[i+1]=-A[i+1]-C[i+1]-(1./dx)-n*fabs(ep[i]/k[i]);
+      RHS[i+1]=-v2[i]/dx-fabs(k[i])*f[i];
+    }
+    A[N]=0.0;
+    B[N]=1.0;
+    C[N]=0.0;
+    RHS[N]=0.0;
+    tridag(A,B,C,RHS,v2-1,N);
+
+    /************************
+     *f equation
+     ***********************/
+    A[1]=0.0;
+    B[1]=1.0;
+    C[1]=0.0;
+    if(bc_iacc!='y')
+      RHS[1]=0.0;
+    else{
+      utau=Calc_Utau(U,y,nu);
+      y_cut=iacc*pow(pow(nu,3.)/ep[0],0.25);
+      LinearInterpolate(v2,y,y_cut,&v2_cut,N);
+      RHS[1]=-(24-4.*n)*pow(nu,2.)*fabs(v2_cut)/(fabs(ep[0])*pow(y_cut,4.));
+    }
+    for(i=1;i<=N-2;i++){
+      /*
+       *Setting up matrix for f equation
+       */
+      A[i+1]=(2./((y[i]-y[i-1])*(y[i+1]-y[i-1])))*pow(L[i],2.);
+      C[i+1]=(2./((y[i+1]-y[i])*(y[i+1]-y[i-1])))*pow(L[i],2.);
+      B[i+1]=-A[i+1]-C[i+1]-1.;
+      /*RHS[i+1]=(1-c1)*((2./3.)-fabs(v2[i]/k[i]))/T[i]-c2*d[i]*pow((U[i+1]-U[i-1])/(y[i+1]-y[i-1]),2.)/(k[i]);*/
+      Gb=beta*gravity*d[i]*(k[i]/ep[i])*((U[i+1]-U[i-1])/(y[i+1]-y[i-1]))*((Temperature[i+1]-Temperature[i-1])/(y[i+1]-y[i-1]));
+      //Gb=(gravity*beta)*(d[i]/Prt)*((Temperature[i+1]-Temperature[i-1])/(y[i+1]-y[i-1]));
+      prod=d[i]*pow((U[i+1]-U[i-1])/(y[i+1]-y[i-1]),2.)+fudge*Gb;
+      RHS[i+1]=((2./3.)*(1-c1)/T[i])-(((n-c1)*fabs(v2[i]/k[i]))/T[i])-c2*prod/(k[i]);
+    }
+    A[N]=0.0;
+    B[N]=1.0;
+    C[N]=0.0;
+    if(bc_iacc!='y')
+      RHS[N]=0.0;
+    else{
+      LinearInterpolate(v2,y,2.-y_cut,&v2_cut,N);
+      RHS[N]=-(24-4.*n)*pow(nu,2.)*fabs(v2_cut)/(fabs(ep[N-1])*pow(y_cut,4.));
+    }
+
+    tridag(A,B,C,RHS,f-1,N);
+    
+    /**************************************
+      Solving for U
+      **************************************/
+    /*for(i=0;i<=N-2;i++){
+      U[i+1]=U[i]+((0.5/(nu+d[i]))*(1.-y[i])+(0.5/(nu+d[i+1]))*(1.-y[i+1]))*(y[i+1]-y[i]);
+    }*/
+    
+    A[1]=0.0;
+    B[1]=1.0;
+    C[1]=0.0;
+    RHS[1]=0.0;
+    for(i=1;i<=N-2;i++){
+      A[i+1]=(1./((y[i]-y[i-1])*(y[i+1]-y[i-1])))*(2.*nu+d[i]+d[i-1]);
+      C[i+1]=(1./((y[i+1]-y[i])*(y[i+1]-y[i-1])))*(2.*nu+d[i]+d[i+1]);
+      B[i+1]=-A[i+1]-C[i+1]-(1./dx);
+      RHS[i+1]=-U[i]/dx-gravity*beta*(Temperature[i]-0.5);
+    }
+    A[N]=0.0;
+    B[N]=1.0;
+    C[N]=0.0;
+    RHS[N]=0.0;
+    tridag(A,B,C,RHS,U-1,N);
+
+
+
+    /**************************************
+      Solving for Temperature
+      **************************************/
+    A[1]=0.0;
+    B[1]=1.0;
+    C[1]=0.0;
+    RHS[1]=1.0;
+    for(i=1;i<=N-2;i++){
+      A[i+1]=(1./((y[i]-y[i-1])*(y[i+1]-y[i-1])))*(2.*kappa+(d[i]+d[i-1])/Prt);
+      C[i+1]=(1./((y[i+1]-y[i])*(y[i+1]-y[i-1])))*(2.*kappa+(d[i]+d[i+1])/Prt);
+      B[i+1]=-A[i+1]-C[i+1]-(1./dx);
+      RHS[i+1]=-Temperature[i]/dx;
+    }
+    A[N]=0.0;
+    B[N]=1.0;
+    C[N]=0.0;
+    RHS[N]=0.0;
+    tridag(A,B,C,RHS,Temperature-1,N);
+
+#ifdef DEBUG
+    utau=pow(nu*(U[1]-U[0])/(y[1]-y[0]),0.5);
+    fprintf(stderr,"nu=%f  utau=%f\n",nu,utau);
+    for(i=1;i<=N;i++)
+      /*printf("%f %f %f %f %e %f\n",y[i-1]*utau/nu,U[i-1]/utau,k[i-1]/pow(utau,2.),ep[i-1]*nu/pow(utau,4.),v2[i-1]/pow(utau,2.),f[i-1]*nu/pow(u_tau,2.));*/
+      printf("%f %f %f %f %e %f\n",y[i-1],U[i-1],k[i-1],ep[i-1],v2[i-1],f[i-1]);
+    printf("\n\n&&&\n\n");
+#endif
+
+    L2Norm_U=0.0;
+    L2Norm_Temperature=0.0;
+    L2Norm_k=0.0;
+    L2Norm_ep=0.0;
+    L2Norm_v2=0.0;
+    L2Norm_f=0.0;
+    for(i=0;i<=N-1;i++){
+      L2Norm_U+=pow(U[i]-U_old[i],2.);
+      L2Norm_Temperature+=pow(Temperature[i]-Temperature_old[i],2.);
+      L2Norm_k+=pow(k[i]-k_old[i],2.);
+      L2Norm_ep+=pow(ep[i]-ep_old[i],2.);
+      L2Norm_v2+=pow(v2[i]-v2_old[i],2.);
+      L2Norm_f+=pow(f[i]-f_old[i],2.);
+    }
+    L2Norm_U=pow(L2Norm_U/N,0.5);
+    L2Norm_Temperature=pow(L2Norm_Temperature/N,0.5);
+    L2Norm_k=pow(L2Norm_k/N,0.5);
+    L2Norm_ep=pow(L2Norm_ep/N,0.5);
+    L2Norm_v2=pow(L2Norm_v2/N,0.5);
+    L2Norm_f=pow(L2Norm_f/N,0.5);
+    
+    if(iter%10==0)
+      fprintf(stdout,"%d %e %e %e %e %e %e\n",iter,L2Norm_U,L2Norm_Temperature,L2Norm_k,L2Norm_ep,L2Norm_v2,L2Norm_f);
+
+    if((L2Norm_Temperature < TINY) && (L2Norm_U < TINY) && (L2Norm_k < TINY) && (L2Norm_ep < TINY) && (L2Norm_v2 < TINY) &&(L2Norm_f < TINY))
+      stop=1;
+  }
+
+  
+  utau=pow(nu*fabs((U[1]-U[0])/(y[1]-y[0])),0.5);
+  
+
+  fp=fopen("output.dat","w");
+  for(i=1;i<=N;i++)
+    /*fprintf(fp,"%f %f %f %f %f %f %e %f %f\n",y[i-1],U[i-1]/utau,k[i-1]/pow(utau,2.),ep[i-1]*nu/pow(utau,4.),v2[i-1]/pow(utau,2.),f[i-1]*nu/pow(utau,2.),y[i-1],d[i-1],d[i-1]*k[i-1]/ep[i-1]);*/
+    //fprintf(fp,"%f %f %f %f %f %f %f %e %f %f\n",y[i-1],U[i-1]/kappa,Temperature[i-1]-0.5,k[i-1]/pow(utau,2.),ep[i-1]*nu/pow(utau,4.),v2[i-1]/pow(utau,2.),f[i-1]*nu/pow(utau,2.),y[i-1],d[i-1],d[i-1]*k[i-1]/ep[i-1]);
+    fprintf(fp,"%f %f %f %f %f %f %f %e %f %f\n",y[i-1],U[i-1]/sqrt(gravity*beta),Temperature[i-1]-0.5,k[i-1]/pow(utau,2.),ep[i-1]*nu/pow(utau,4.),v2[i-1]/pow(utau,2.),f[i-1]*nu/pow(utau,2.),y[i-1],d[i-1],d[i-1]*k[i-1]/ep[i-1]);
+  fclose(fp);
+
+  
+
+//  fp=fopen("Velocity.dat","w");
+//  for(i=1;i<=N-2;i++){
+//    fprintf(fp,"%f %f \n",y[i],U[i]/kappa);
+//    /*fprintf(fp,"%f %f \n",y[i],U[i]/utau);*/
+//  }
+//  fclose(fp);
+//
+//  fp=fopen("kv2.dat","w");
+//  for(i=1;i<=N-2;i++){
+//    fprintf(fp,"%f %e %e\n",y[i],k[i]/pow(kappa,2.),v2[i]/pow(kappa,2.));
+//  }
+//  fclose(fp);
+//
+//  fp=fopen("Epsilon.dat","w");
+//  for(i=1;i<=N-2;i++){
+//    //fprintf(fp,"%f %e %e\n",y[i],(ep[i]/pow(kappa,3.)));
+//    fprintf(fp,"%f %e \n",y[i],(ep[i]/pow(kappa,3.)));
+//  }
+//  fclose(fp);
+//
+//  fp=fopen("EddyViscosity.dat","w");
+//  for(i=1;i<=N-2;i++){
+//    //fprintf(fp,"%f %e %e\n",y[i],0.22*(k[i]/pow(kappa,2.))*(v2[i]/pow(kappa,2.))/(ep[i]/pow(kappa,3.)));
+//    fprintf(fp,"%f %e \n",y[i],0.22*(k[i]/pow(kappa,2.))*(v2[i]/pow(kappa,2.))/(ep[i]/pow(kappa,3.)));
+//  }
+//  fclose(fp);
+//
+//  /*fp=fopen("TimeScale.dat","w");
+//  for(i=1;i<=N-2;i++){
+//    prod=d[i]*pow((U[i+1]-U[i-1])/(y[i+1]-y[i-1]),2.);
+//    Fprintf(fp,"%f %f %f\n",y[i],k[i]/ep[i],k[i]/(pow(3,0.5)*v2[i]*cmu*pow(prod,0.5)));
+//  }
+//  fclose(fp);*/
+//
+  uplus=pow(nu*(U[1]-U[0])/(y[1]-y[0]),0.5);
+  ThetaPlus=fabs((kappa/uplus)*(Temperature[1]-Temperature[0])/(y[1]-y[0]));
+  fprintf(stderr,"nu=%f  utau=%f thetaplus=%f\n",nu,utau,ThetaPlus);
+//  fp=fopen("Temperature.dat","w");
+//  for(i=1;i<=N-2;i++){
+//    /*fprintf(fp,"%f %f\n",y[i],(Temperature[i]-0.5)/ThetaPlus);*/
+//    fprintf(fp,"%f %f\n",y[i],(Temperature[i]-0.5));
+//  }
+//  fclose(fp);
+//    
+  sprintf(OutFilename,"LatestGridAndGuess.data");
+  WriteGridAndInitialGuessData(OutFilename,y,U,Temperature,k,ep,v2,f,N);
+    
+}
+
+
+
+void EquallySpacedGrid(double *y,int N)
+{
+  int i;
+
+  /*******************************************************************
+    grid points (for this simulation, use equally spaced grid points)
+    ******************************************************************/
+  for(i=0;i<=N-1;i++)
+    y[i]=(2./(N-1))*i;
+}
+
+void StretchedGrid(double *y,int N)
+{
+  int i;
+  double x,dx;
+
+  dx=pow(log(2),0.5)/(N/2+1);
+  x=0.0;
+  y[0]=0.0;
+
+  for(i=1;i<=(N/2)-1;i++){
+    x+=dx;
+    y[i]=exp(x*x)-1;
+  }
+
+  for(i=1;i<=N/2;i++)
+    y[N/2+(i-1)]=2.-y[N/2-i];
+
+    
+}
+
+void ReadGridAndInitialGuessData(char *Filename,double *y,double *U,double *Temperature,double *k,double *ep,double *v2,double *f,int N)
+{
+  
+  FILE *fp;
+  int i;
+
+  fp=fopen(Filename,"r");
+
+  for(i=0;i<=N-1;i++){
+    fscanf(fp,"%lf %lf %lf %lf %lf %lf",&y[i],&U[i],&k[i],&ep[i],&v2[i],&f[i]);
+    Temperature[i]=1.0;
+    U[i]=sin(2*3.14159265359*y[i]);
+  }
+  fclose(fp);
+
+}
+
+void ReadRestartData(char *Filename,double *y,double *U,double *Temperature,double *k,double *ep,double *v2,double *f,int N)
+{
+  
+  FILE *fp;
+  int i;
+
+  fp=fopen(Filename,"r");
+
+  for(i=0;i<=N-1;i++)
+    fscanf(fp,"%lf %lf %lf %lf %lf %lf %lf",&y[i],&U[i],&Temperature[i],&k[i],&ep[i],&v2[i],&f[i]);
+  fclose(fp);
+}
+
+void WriteGridAndInitialGuessData(char *Filename,double *y,double *U,double *Temperature,double *k,double *ep,double *v2,double *f,int N)
+{
+  
+  FILE *fp;
+  int i;
+
+  fp=fopen(Filename,"w");
+
+  for(i=0;i<=N-1;i++)
+    fprintf(fp,"%15.12e %15.12e %15.12e %15.12e %15.12e %15.12e %15.12e\n",y[i],U[i],Temperature[i],k[i],ep[i],v2[i],f[i]);
+  
+  fclose(fp);
+}
+
+double Calc_Utau(double *U,double *y,double nu)
+{
+  return pow(nu*(U[2]-U[0])/(y[2]-y[0]),0.5);
+}
+
+void LinearInterpolate(double *func,double *y,double yp,double *value,int N)
+{
+  int i;
+  i=0;
+  while(y[i]<yp)
+    i++;
+
+  *value=func[i-1]+((func[i]-func[i-1])/(y[i]-y[i-1]))*(yp-y[i-1]);
+}
